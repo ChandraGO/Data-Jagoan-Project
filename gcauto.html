@@ -1,522 +1,473 @@
-import fs from 'fs'
-import path from 'path'
-import schedule from 'node-schedule'
-import moment from 'moment-timezone'
-import { fileURLToPath } from 'url'
-
-////////////////////////////
-/* 🚀 Jagoan Project - Buat Bot Makin Keren! 🚀
-📢 Jangan lupa *Subscribe* & *Like* semua video kami!
-💬 Butuh panel untuk *Run WhatsApp Bot*? Hubungi: *0895-3622-82300*
-🛒 Jual *Script Bot WhatsApp* hanya *80K* - Free Update! 🔥
-✨ Dapatkan bot WhatsApp canggih & selalu up-to-date!
-*/
-////////////////////////////
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const WEB_HTML_FILE = 'gcauto-web-friendly.html'
-
-/** ====== TIMEZONE ====== */
-const TIMEZONE = (global.getZonaWaktu && global.getZonaWaktu()) || 'Asia/Jakarta'
-const TIMEZONE_LABEL =
-  TIMEZONE === 'Asia/Jakarta' ? 'WIB' :
-  TIMEZONE === 'Asia/Makassar' ? 'WITA' :
-  TIMEZONE === 'Asia/Jayapura' ? 'WIT' : TIMEZONE
-
-const DAY_NAMES = {
-  1: 'Senin',
-  2: 'Selasa',
-  3: 'Rabu',
-  4: 'Kamis',
-  5: 'Jumat',
-  6: 'Sabtu',
-  7: 'Minggu'
-}
-
-/** ====== HELPERS ====== */
-function parseHHMM(str) {
-  if (!str) return null
-  const m = String(str).trim().match(/^(\d{1,2}):(\d{2})$/)
-  if (!m) return null
-  const hh = Number(m[1])
-  const mm = Number(m[2])
-  if (Number.isNaN(hh) || Number.isNaN(mm)) return null
-  if (hh < 0 || hh > 23) return null
-  if (mm < 0 || mm > 59) return null
-  return { hh: hh, mm: mm }
-}
-
-function pad2(n) {
-  return String(n).padStart(2, '0')
-}
-
-function timeToText(h, m) {
-  return pad2(h) + ':' + pad2(m)
-}
-
-function ensureDB() {
-  if (!global.db) global.db = { data: {} }
-  if (!global.db.data) global.db.data = {}
-  if (!global.db.data.chats) global.db.data.chats = {}
-}
-
-function buildDefaultOpenMsg() {
-  return '✅ Grup dibuka. Silakan chat.'
-}
-
-function buildDefaultCloseMsg() {
-  return '🔒 Grup ditutup. Chat dinonaktifkan sementara.'
-}
-
-function buildDefaultWarnMsg(closeHour, closeMinute, warnMinutes) {
-  const mins = warnMinutes == null ? 15 : Number(warnMinutes)
-  return '⚠️ Peringatan! ' + mins + ' menit lagi grup akan ditutup.\n🕒 Tutup: ' + timeToText(closeHour, closeMinute) + ' ' + TIMEZONE_LABEL
-}
-
-function getDayName(dayId) {
-  return DAY_NAMES[Number(dayId)] || ('Hari ' + dayId)
-}
-
-function getWebHtmlBuffer() {
-  try {
-    const filePath = path.join(__dirname, WEB_HTML_FILE)
-    if (!fs.existsSync(filePath)) return null
-    return fs.readFileSync(filePath)
-  } catch (e) {
-    return null
-  }
-}
-
-function getScheduleForDay(setting, dayId) {
-  if (!setting || !setting.daily) return null
-  const item = setting.daily[String(dayId)]
-  if (!item) return null
-
-  const openHour = Number(item.openHour)
-  const openMinute = Number(item.openMinute)
-  const closeHour = Number(item.closeHour)
-  const closeMinute = Number(item.closeMinute)
-
-  if ([openHour, openMinute, closeHour, closeMinute].some(function (n) { return Number.isNaN(n) })) {
-    return null
-  }
-
-  const warnBeforeCloseMinutes = item.warnBeforeCloseMinutes == null ? 15 : Number(item.warnBeforeCloseMinutes)
-
-  return {
-    dayId: Number(dayId),
-    dayName: item.dayName || getDayName(dayId),
-    openHour: openHour,
-    openMinute: openMinute,
-    closeHour: closeHour,
-    closeMinute: closeMinute,
-    openMsg: item.openMsg || setting.openMsg || buildDefaultOpenMsg(),
-    closeMsg: item.closeMsg || setting.closeMsg || buildDefaultCloseMsg(),
-    warnBeforeCloseMinutes: Number.isNaN(warnBeforeCloseMinutes) ? 15 : warnBeforeCloseMinutes,
-    warnMsg: item.warnMsg || buildDefaultWarnMsg(closeHour, closeMinute, warnBeforeCloseMinutes)
-  }
-}
-
-function setDaySchedule(setting, dayId, open, close, openMsg, closeMsg) {
-  if (!setting.daily) setting.daily = {}
-
-  const prev = setting.daily[String(dayId)] || {}
-  const warnBeforeCloseMinutes = prev.warnBeforeCloseMinutes == null ? 15 : Number(prev.warnBeforeCloseMinutes)
-
-  setting.daily[String(dayId)] = {
-    dayId: Number(dayId),
-    dayName: getDayName(dayId),
-    openHour: open.hh,
-    openMinute: open.mm,
-    closeHour: close.hh,
-    closeMinute: close.mm,
-    openMsg: openMsg || prev.openMsg || setting.openMsg || buildDefaultOpenMsg(),
-    closeMsg: closeMsg || prev.closeMsg || setting.closeMsg || buildDefaultCloseMsg(),
-    warnBeforeCloseMinutes: Number.isNaN(warnBeforeCloseMinutes) ? 15 : warnBeforeCloseMinutes,
-    warnMsg: buildDefaultWarnMsg(close.hh, close.mm, warnBeforeCloseMinutes)
-  }
-}
-
-function listUnsetDays(setting) {
-  const result = []
-  for (let i = 1; i <= 7; i += 1) {
-    if (!setting.daily || !setting.daily[String(i)]) result.push(getDayName(i))
-  }
-  return result
-}
-
-function parseIds(raw) {
-  const ids = String(raw || '')
-    .split(',')
-    .map(function (s) { return s.trim() })
-    .filter(Boolean)
-    .map(function (s) { return Number(s) })
-
-  const valid = []
-  for (let i = 0; i < ids.length; i += 1) {
-    const id = ids[i]
-    if (id >= 1 && id <= 7 && valid.indexOf(id) === -1) valid.push(id)
-  }
-  return valid
-}
-
-function parseScheduleLine(raw) {
-  const line = String(raw || '').trim()
-  if (!line) return null
-
-  const parts = line.split('|')
-  const base = parts[0] ? parts[0].trim() : ''
-  const openMsg = parts.length >= 2 ? parts[1].trim() : null
-  const closeMsg = parts.length >= 3 ? parts[2].trim() : null
-
-  const m = base.match(/^([1-7](?:\s*,\s*[1-7])*)\s+(\d{1,2}:\d{2})\s*,\s*(\d{1,2}:\d{2})$/)
-  if (!m) return null
-
-  const dayIds = parseIds(m[1])
-  const open = parseHHMM(m[2])
-  const close = parseHHMM(m[3])
-
-  if (!dayIds.length || !open || !close) return null
-
-  return {
-    dayIds: dayIds,
-    open: open,
-    close: close,
-    openMsg: openMsg || null,
-    closeMsg: closeMsg || null
-  }
-}
-
-function splitEntries(raw) {
-  return String(raw || '')
-    .split(/\n|;/)
-    .map(function (s) { return s.trim() })
-    .filter(Boolean)
-}
-
-function formatWeeklyStatus(setting) {
-  const lines = []
-  lines.push('⚙️ *STATUS GCAUTO*')
-  lines.push('')
-  for (let i = 1; i <= 7; i += 1) {
-    const sc = getScheduleForDay(setting, i)
-    if (!sc) {
-      lines.push('• ' + getDayName(i) + ': FREE / grup terbuka seharian')
-      continue
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>GCAuto Web Builder</title>
+  <style>
+    :root{
+      --bg:#f4f7fb;
+      --card:#ffffff;
+      --text:#162033;
+      --muted:#6b7280;
+      --line:#e5e7eb;
+      --primary:#2563eb;
+      --primary2:#1d4ed8;
+      --soft:#eff6ff;
+      --danger:#ef4444;
+      --radius:20px;
+      --shadow:0 16px 36px rgba(15,23,42,.08);
     }
-
-    let customLabel = ''
-    const item = setting.daily && setting.daily[String(i)] ? setting.daily[String(i)] : null
-    if (item && (item.openMsg || item.closeMsg)) customLabel = ' | pesan custom'
-
-    lines.push(
-      '• ' + getDayName(i) + ': buka ' + timeToText(sc.openHour, sc.openMinute) +
-      ' | tutup ' + timeToText(sc.closeHour, sc.closeMinute) + ' ' + TIMEZONE_LABEL + customLabel
-    )
-  }
-
-  lines.push('')
-  lines.push('📢 Pesan default buka: ' + (setting.openMsg || buildDefaultOpenMsg()))
-  lines.push('📢 Pesan default tutup: ' + (setting.closeMsg || buildDefaultCloseMsg()))
-  lines.push('⚠️ Warning: ' + ((setting.warnBeforeCloseMinutes == null) ? 15 : setting.warnBeforeCloseMinutes) + ' menit sebelum tutup')
-  return lines.join('\n')
-}
-
-function getHelpText() {
-  return (
-    '⚙️ *PANDUAN SET GCAUTO*\n\n' +
-    '• .setgcauto [id_hari] [open],[close]\n' +
-    '• .setgcauto [id_hari] [open],[close]|teks buka|teks tutup\n' +
-    '• .setgcauto status\n' +
-    '• .setgcauto off\n\n' +
-    'ID Hari:\n' +
-    '1 = Senin\n' +
-    '2 = Selasa\n' +
-    '3 = Rabu\n' +
-    '4 = Kamis\n' +
-    '5 = Jumat\n' +
-    '6 = Sabtu\n' +
-    '7 = Minggu\n\n' +
-    'Contoh Penggunaan:\n' +
-    '➤ Set Senin & Selasa (Buka 07:00, Tutup 23:00)\n' +
-    '.setgcauto 1,2 07:00,23:00\n\n' +
-    '➤ Set Minggu aja (Buka 05:00, Tutup 21:00)\n' +
-    '.setgcauto 7 05:00,21:00\n\n' +
-    '➤ Set dengan teks custom\n' +
-    '.setgcauto 1,2 07:00,23:00|✅ Grup dibuka|🔒 Grup ditutup'
-  )
-}
-
-/** ====== SAFE ACCESSORS ====== */
-function hasConn() {
-  return global.jagoanproject && typeof global.jagoanproject === 'object'
-}
-function canSend() {
-  return hasConn() && typeof global.jagoanproject.sendMessage === 'function'
-}
-function canUpdateGroup() {
-  return hasConn() && typeof global.jagoanproject.groupSettingUpdate === 'function'
-}
-
-/** ====== SEND WEB HTML ====== */
-async function sendWebHtml(chatId) {
-  try {
-    const htmlBuffer = getWebHtmlBuffer()
-    if (!htmlBuffer || !canSend()) return false
-
-    await global.jagoanproject.sendMessage(chatId, {
-      document: htmlBuffer,
-      mimetype: 'text/html',
-      fileName: WEB_HTML_FILE,
-      caption: '🌐 Web setting GCAuto'
-    })
-    return true
-  } catch (e) {
-    console.log('[GCAUTO][WEB] gagal kirim html:', (e && e.message) ? e.message : e)
-    return false
-  }
-}
-
-/** ====== SCHEDULER START (ON LOAD) ====== */
-function startScheduler() {
-  if (global.gcautoJob) {
-    try { global.gcautoJob.cancel() } catch (e) {}
-  }
-
-  const rule = new schedule.RecurrenceRule()
-  rule.tz = TIMEZONE
-  rule.second = 0
-  rule.minute = new schedule.Range(0, 59, 1)
-
-  global.gcautoJob = schedule.scheduleJob(rule, async function () {
-    try {
-      ensureDB()
-      const now = moment.tz(TIMEZONE)
-      const hour = now.hour()
-      const minute = now.minute()
-      const today = now.format('YYYY-MM-DD')
-      const dayId = now.isoWeekday()
-
-      const chats = global.db.data.chats || {}
-
-      for (const id in chats) {
-        if (!id.endsWith('@g.us')) continue
-
-        const chat = chats[id]
-        const setting = chat.security
-        if (!setting || !setting.isActive) continue
-
-        const currentSchedule = getScheduleForDay(setting, dayId)
-
-        // Hari yang tidak di-set = grup otomatis terbuka
-        if (!currentSchedule) {
-          const freeKey = 'free_open_' + today + '_' + dayId
-          if (setting._lastFreeOpenKey !== freeKey) {
-            setting._lastFreeOpenKey = freeKey
-            try {
-              if (canUpdateGroup()) {
-                await global.jagoanproject.groupSettingUpdate(id, 'not_announcement')
-              }
-              console.log('[GCAUTO][FREE-OPEN] grup dibuka karena hari tidak di-set', id)
-            } catch (e) {
-              console.log('[GCAUTO][FREE-OPEN] gagal buka grup', id, (e && e.message) ? e.message : e)
-            }
-          }
-          continue
-        }
-
-        const openHour = Number(currentSchedule.openHour)
-        const openMinute = Number(currentSchedule.openMinute)
-        const closeHour = Number(currentSchedule.closeHour)
-        const closeMinute = Number(currentSchedule.closeMinute)
-        const warnMins = currentSchedule.warnBeforeCloseMinutes == null ? 15 : Number(currentSchedule.warnBeforeCloseMinutes)
-        const warnMsg = currentSchedule.warnMsg || buildDefaultWarnMsg(closeHour, closeMinute, warnMins)
-        const openMsg = currentSchedule.openMsg || buildDefaultOpenMsg()
-        const closeMsg = currentSchedule.closeMsg || buildDefaultCloseMsg()
-
-        if ([openHour, openMinute, closeHour, closeMinute].some(function (n) { return Number.isNaN(n) })) continue
-
-        if (!Number.isNaN(warnMins) && warnMins > 0) {
-          const closeTotal = (closeHour * 60) + closeMinute
-          const nowTotal = (hour * 60) + minute
-
-          if (nowTotal === closeTotal - warnMins) {
-            const warnKey = 'warn_' + today + '_' + dayId + '_' + timeToText(closeHour, closeMinute)
-            if (setting._lastWarnKey !== warnKey) {
-              setting._lastWarnKey = warnKey
-              try {
-                if (canSend() && warnMsg) {
-                  await global.jagoanproject.sendMessage(id, { text: warnMsg })
-                }
-                console.log('[GCAUTO][WARN] terkirim ke', id)
-              } catch (e) {
-                console.log('[GCAUTO][WARN] gagal kirim warning ke', id, (e && e.message) ? e.message : e)
-              }
-            }
-          }
-        }
-
-        if (hour === openHour && minute === openMinute) {
-          const openKey = 'open_' + today + '_' + dayId + '_' + timeToText(openHour, openMinute)
-          if (setting._lastOpenKey !== openKey) {
-            setting._lastOpenKey = openKey
-            try {
-              if (canUpdateGroup()) {
-                await global.jagoanproject.groupSettingUpdate(id, 'not_announcement')
-              }
-              if (canSend() && openMsg) {
-                await global.jagoanproject.sendMessage(id, { text: openMsg })
-              }
-              console.log('[GCAUTO][OPEN] berhasil buka grup', id)
-            } catch (e) {
-              console.log('[GCAUTO][OPEN] gagal buka grup', id, (e && e.message) ? e.message : e)
-            }
-          }
-        }
-
-        if (hour === closeHour && minute === closeMinute) {
-          const closeKey = 'close_' + today + '_' + dayId + '_' + timeToText(closeHour, closeMinute)
-          if (setting._lastCloseKey !== closeKey) {
-            setting._lastCloseKey = closeKey
-            try {
-              if (canUpdateGroup()) {
-                await global.jagoanproject.groupSettingUpdate(id, 'announcement')
-              }
-              if (canSend() && closeMsg) {
-                await global.jagoanproject.sendMessage(id, { text: closeMsg })
-              }
-              console.log('[GCAUTO][CLOSE] berhasil tutup grup', id)
-            } catch (e) {
-              console.log('[GCAUTO][CLOSE] gagal tutup grup', id, (e && e.message) ? e.message : e)
-            }
-          }
-        }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      background:
+        radial-gradient(circle at top left, #dbeafe 0, transparent 32%),
+        linear-gradient(180deg,#f7faff 0,#eef4ff 100%);
+      color:var(--text);
+    }
+    .wrap{
+      max-width:980px;
+      margin:0 auto;
+      padding:24px 16px 72px;
+    }
+    .hero{
+      padding:18px 18px 8px;
+    }
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:10px 14px;
+      border-radius:999px;
+      background:rgba(255,255,255,.72);
+      backdrop-filter: blur(10px);
+      border:1px solid rgba(255,255,255,.7);
+      color:var(--primary2);
+      font-weight:700;
+      font-size:13px;
+      box-shadow:var(--shadow);
+    }
+    h1{
+      margin:16px 0 8px;
+      font-size:clamp(28px,5vw,42px);
+      line-height:1.08;
+    }
+    .lead{
+      margin:0;
+      font-size:15px;
+      color:var(--muted);
+      max-width:760px;
+      line-height:1.65;
+    }
+    .grid{
+      display:grid;
+      grid-template-columns:1.2fr .8fr;
+      gap:18px;
+      margin-top:18px;
+    }
+    .card{
+      background:rgba(255,255,255,.94);
+      border:1px solid rgba(255,255,255,.75);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:18px;
+    }
+    .card h2{
+      margin:0 0 6px;
+      font-size:19px;
+    }
+    .sub{
+      font-size:13px;
+      color:var(--muted);
+      margin:0 0 14px;
+      line-height:1.55;
+    }
+    .master{
+      display:grid;
+      grid-template-columns:1fr 1fr auto auto;
+      gap:10px;
+      align-items:end;
+    }
+    label{
+      display:block;
+      font-size:13px;
+      font-weight:700;
+      margin-bottom:8px;
+    }
+    input[type="time"], textarea{
+      width:100%;
+      border:1px solid var(--line);
+      border-radius:14px;
+      background:#fff;
+      padding:13px 14px;
+      font:inherit;
+      color:var(--text);
+      outline:none;
+      transition:.2s border-color,.2s box-shadow,.2s transform;
+    }
+    input[type="time"]:focus, textarea:focus{
+      border-color:#93c5fd;
+      box-shadow:0 0 0 4px rgba(37,99,235,.12);
+    }
+    textarea{
+      resize:vertical;
+      min-height:92px;
+    }
+    .btn{
+      border:0;
+      border-radius:14px;
+      padding:13px 16px;
+      font:inherit;
+      font-weight:800;
+      cursor:pointer;
+      transition:.18s transform,.18s opacity,.18s box-shadow;
+      white-space:nowrap;
+    }
+    .btn:hover{ transform:translateY(-1px); }
+    .btn:active{ transform:translateY(0); }
+    .btn-primary{
+      background:linear-gradient(135deg,var(--primary),var(--primary2));
+      color:#fff;
+      box-shadow:0 10px 22px rgba(37,99,235,.28);
+    }
+    .btn-soft{
+      background:#eef2ff;
+      color:#334155;
+    }
+    .btn-danger{
+      background:#fef2f2;
+      color:#b91c1c;
+    }
+    .days{
+      margin-top:12px;
+      display:grid;
+      gap:12px;
+    }
+    .day{
+      display:grid;
+      grid-template-columns:148px 1fr 1fr auto;
+      gap:10px;
+      align-items:end;
+      padding:14px;
+      border:1px solid var(--line);
+      border-radius:18px;
+      background:#fff;
+    }
+    .day-title{
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+    }
+    .day-name{
+      font-weight:800;
+      font-size:15px;
+    }
+    .day-id{
+      font-size:12px;
+      color:var(--muted);
+    }
+    .text-grid{
+      display:grid;
+      gap:12px;
+    }
+    .sticky{
+      position:sticky;
+      top:16px;
+    }
+    .summary{
+      display:grid;
+      gap:10px;
+      margin-top:12px;
+    }
+    .pill{
+      display:flex;
+      justify-content:space-between;
+      gap:12px;
+      padding:12px 14px;
+      border-radius:14px;
+      background:var(--soft);
+      color:#1e3a8a;
+      font-size:13px;
+      font-weight:700;
+    }
+    .mini{
+      font-size:12px;
+      color:var(--muted);
+      line-height:1.6;
+      margin:0;
+    }
+    .footer-action{
+      margin-top:16px;
+      display:grid;
+      gap:10px;
+    }
+    .big{
+      width:100%;
+      min-height:52px;
+      font-size:15px;
+    }
+    .hidden{
+      display:none!important;
+    }
+    @media (max-width:860px){
+      .grid{grid-template-columns:1fr}
+      .sticky{position:static}
+    }
+    @media (max-width:640px){
+      .master{
+        grid-template-columns:1fr 1fr;
       }
-    } catch (e) {
-      console.log('[GCAUTO][JOB] error umum:', (e && e.message) ? e.message : e)
+      .master .btn{
+        width:100%;
+      }
+      .day{
+        grid-template-columns:1fr 1fr;
+      }
+      .day-title{
+        grid-column:1 / -1;
+      }
+      .day .btn{
+        grid-column:1 / -1;
+      }
     }
-  })
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="badge">⚙️ GCAuto Web Builder</div>
+      <h1>Atur jadwal buka tutup grup lebih cepat</h1>
+      <p class="lead">
+        Isi jadwal yang dibutuhkan, kosongkan hari yang tidak ingin diatur, lalu lanjutkan ke WhatsApp.
+        Kalau ada beberapa hari dengan jam berbeda, halaman ini tetap akan membuat <b>1 pesan saja</b> supaya cukup kirim sekali.
+      </p>
+    </section>
 
-  console.log('[GCAUTO] Scheduler aktif. TZ =', TIMEZONE)
-}
+    <div class="grid">
+      <section class="card">
+        <h2>Jadwal Mingguan</h2>
+        <p class="sub">Jam kosong = hari tersebut tidak ikut dibuat. Hari dengan jam yang sama akan digabung otomatis jadi 1 pesan.</p>
 
-startScheduler()
+        <div class="card" style="padding:14px; border-radius:18px; background:#f8fbff; box-shadow:none; margin-bottom:14px;">
+          <h2 style="font-size:16px; margin-bottom:6px;">Samakan Semua Hari</h2>
+          <p class="sub" style="margin-bottom:12px;">Isi sekali, lalu terapkan ke Senin sampai Minggu.</p>
+          <div class="master">
+            <div>
+              <label for="masterOpen">Jam Buka</label>
+              <input type="time" id="masterOpen">
+            </div>
+            <div>
+              <label for="masterClose">Jam Tutup</label>
+              <input type="time" id="masterClose">
+            </div>
+            <button class="btn btn-soft" id="applyAllBtn" type="button">Samakan Semua</button>
+            <button class="btn btn-danger" id="clearAllBtn" type="button">Kosongkan</button>
+          </div>
+        </div>
 
-/** ====== HANDLER COMMAND ====== */
-let handler = async (m, { text, isAdmin, isOwner, isROwner }) => {
-  ensureDB()
+        <div class="days" id="daysContainer"></div>
+      </section>
 
-  if (!m.chat.endsWith('@g.us')) {
-    return m.reply('Fitur ini hanya untuk grup.')
-  }
+      <aside class="sticky">
+        <div class="card">
+          <h2>Teks Otomatis</h2>
+          <p class="sub">Boleh dikosongkan. Kalau kosong, bot akan pakai pesan default.</p>
+          <div class="text-grid">
+            <div>
+              <label for="openText">Teks saat grup dibuka</label>
+              <textarea id="openText" placeholder="Contoh: ✅ Grup sudah dibuka, silakan chat ya."></textarea>
+            </div>
+            <div>
+              <label for="closeText">Teks saat grup ditutup</label>
+              <textarea id="closeText" placeholder="Contoh: 🔒 Grup ditutup sementara, nanti dibuka lagi sesuai jadwal."></textarea>
+            </div>
+          </div>
 
-  if (!isAdmin && !isOwner && !isROwner) {
-    return m.reply('Khusus admin grup.')
-  }
+          <div class="summary">
+            <div class="pill"><span>Hari aktif</span><span id="activeDaysCount">0 hari</span></div>
+            <div class="pill"><span>Format command</span><span>.setgcauto</span></div>
+          </div>
 
-  const chat = global.db.data.chats[m.chat] || (global.db.data.chats[m.chat] = {})
-  chat.security = chat.security || {}
-  if (!chat.security.daily) chat.security.daily = {}
+          <div class="footer-action">
+            <button class="btn btn-primary big" id="sendBtn" type="button">Lanjut ke WhatsApp</button>
+            <p class="mini" id="miniInfo">Command akan dibuat otomatis dari jadwal yang kamu isi.</p>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
 
-  const args = (text || '').trim()
+  <script>
+    const DAYS = [
+      { id: 1, name: 'Senin' },
+      { id: 2, name: 'Selasa' },
+      { id: 3, name: 'Rabu' },
+      { id: 4, name: 'Kamis' },
+      { id: 5, name: 'Jumat' },
+      { id: 6, name: 'Sabtu' },
+      { id: 7, name: 'Minggu' }
+    ];
 
-  if (!args) {
-    await m.reply(getHelpText())
-    await sendWebHtml(m.chat)
-    return
-  }
+    const daysContainer = document.getElementById('daysContainer');
+    const activeDaysCount = document.getElementById('activeDaysCount');
+    const miniInfo = document.getElementById('miniInfo');
+    const openText = document.getElementById('openText');
+    const closeText = document.getElementById('closeText');
 
-  if (/^(off|mati|disable)$/i.test(args)) {
-    chat.security.isActive = false
-    return m.reply('✅ GCAuto dimatikan.')
-  }
+    function buildDayRows() {
+      daysContainer.innerHTML = DAYS.map(day => `
+        <div class="day" data-day-id="${day.id}">
+          <div class="day-title">
+            <div class="day-name">${day.name}</div>
+            <div class="day-id">ID ${day.id}</div>
+          </div>
+          <div>
+            <label for="open-${day.id}">Buka</label>
+            <input type="time" id="open-${day.id}" class="day-open" data-day-id="${day.id}">
+          </div>
+          <div>
+            <label for="close-${day.id}">Tutup</label>
+            <input type="time" id="close-${day.id}" class="day-close" data-day-id="${day.id}">
+          </div>
+          <button class="btn btn-soft clear-day-btn" type="button" data-day-id="${day.id}">Kosongkan Hari</button>
+        </div>
+      `).join('');
 
-  if (/^(status|cek)$/i.test(args)) {
-    const s = chat.security
-    if (!s || !s.isActive) return m.reply('GCAuto: OFF')
-    return m.reply(formatWeeklyStatus(s))
-  }
+      document.querySelectorAll('.clear-day-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-day-id');
+          document.getElementById(`open-${id}`).value = '';
+          document.getElementById(`close-${id}`).value = '';
+          updateSummary();
+        });
+      });
 
-  const entries = splitEntries(args)
-  const appliedGroups = []
-  const failedRows = []
-
-  for (let i = 0; i < entries.length; i += 1) {
-    const parsed = parseScheduleLine(entries[i])
-    if (!parsed) {
-      failedRows.push(entries[i])
-      continue
+      document.querySelectorAll('.day-open, .day-close').forEach(input => {
+        input.addEventListener('input', updateSummary);
+        input.addEventListener('change', updateSummary);
+      });
     }
 
-    chat.security.isActive = true
-    if (chat.security.warnBeforeCloseMinutes == null || Number.isNaN(Number(chat.security.warnBeforeCloseMinutes))) {
-      chat.security.warnBeforeCloseMinutes = 15
-    }
-    if (!chat.security.openMsg) chat.security.openMsg = buildDefaultOpenMsg()
-    if (!chat.security.closeMsg) chat.security.closeMsg = buildDefaultCloseMsg()
-
-    for (let j = 0; j < parsed.dayIds.length; j += 1) {
-      const dayId = parsed.dayIds[j]
-      setDaySchedule(chat.security, dayId, parsed.open, parsed.close, parsed.openMsg, parsed.closeMsg)
-    }
-
-    appliedGroups.push(parsed)
-  }
-
-  if (!appliedGroups.length) {
-    return m.reply('Format salah.\n\n' + getHelpText())
-  }
-
-  const lines = []
-  lines.push('✅ Berhasil mengatur jadwal GCAuto!')
-  lines.push('')
-
-  for (let i = 0; i < appliedGroups.length; i += 1) {
-    const item = appliedGroups[i]
-    const dayNames = item.dayIds.map(function (id) { return getDayName(id) }).join(', ')
-
-    lines.push('🗓️ Hari: ' + dayNames)
-    lines.push('🔓 Buka: ' + timeToText(item.open.hh, item.open.mm) + ' ' + TIMEZONE_LABEL)
-    lines.push('🔒 Tutup: ' + timeToText(item.close.hh, item.close.mm) + ' ' + TIMEZONE_LABEL)
-
-    if (item.openMsg || item.closeMsg) {
-      lines.push('📢 Pesan Buka: ' + (item.openMsg || buildDefaultOpenMsg()))
-      lines.push('📢 Pesan Tutup: ' + (item.closeMsg || buildDefaultCloseMsg()))
+    function applyAllTimes() {
+      const open = document.getElementById('masterOpen').value;
+      const close = document.getElementById('masterClose').value;
+      if (!open || !close) {
+        alert('Isi jam buka dan jam tutup dulu untuk fitur Samakan Semua.');
+        return;
+      }
+      DAYS.forEach(day => {
+        document.getElementById(`open-${day.id}`).value = open;
+        document.getElementById(`close-${day.id}`).value = close;
+      });
+      updateSummary();
     }
 
-    if (i !== appliedGroups.length - 1) lines.push('')
-  }
-
-  const unsetDays = listUnsetDays(chat.security)
-  if (unsetDays.length) {
-    lines.push('')
-    lines.push('🆓 Hari tanpa setting: ' + unsetDays.join(', '))
-  }
-
-  if (failedRows.length) {
-    lines.push('')
-    lines.push('⚠️ Baris tidak terbaca:')
-    for (let i = 0; i < failedRows.length; i += 1) {
-      lines.push('• ' + failedRows[i])
+    function clearAllTimes() {
+      document.getElementById('masterOpen').value = '';
+      document.getElementById('masterClose').value = '';
+      DAYS.forEach(day => {
+        document.getElementById(`open-${day.id}`).value = '';
+        document.getElementById(`close-${day.id}`).value = '';
+      });
+      updateSummary();
     }
-  }
 
-  lines.push('')
-  lines.push('Ketik .setgcauto status untuk melihat jadwal lengkap mingguan')
+    function collectSchedules() {
+      const rows = [];
+      for (const day of DAYS) {
+        const open = document.getElementById(`open-${day.id}`).value;
+        const close = document.getElementById(`close-${day.id}`).value;
+        if (!open && !close) continue;
+        if (!open || !close) {
+          throw new Error(`Jam untuk ${day.name} belum lengkap.`);
+        }
+        rows.push({ dayId: day.id, dayName: day.name, open, close });
+      }
+      return rows;
+    }
 
-  return m.reply(lines.join('\n'))
-}
+    function buildCommand() {
+      const rows = collectSchedules();
+      if (!rows.length) {
+        throw new Error('Isi minimal 1 hari dulu.');
+      }
 
-handler.help = [
-  'setgcauto [id_hari] [open],[close]',
-  'setgcauto [id_hari] [open],[close]|teks buka|teks tutup',
-  'setgcauto status',
-  'setgcauto off'
-]
-handler.tags = ['group']
-handler.command = /^(gcauto|setgcauto)$/i
-handler.admin = true
-handler.botAdmin = true
+      const openMsg = openText.value.trim();
+      const closeMsg = closeText.value.trim();
 
-export default handler
+      if (openMsg.includes('|') || closeMsg.includes('|')) {
+        throw new Error('Teks buka/tutup tidak boleh mengandung karakter |');
+      }
+
+      const groups = new Map();
+
+      rows.forEach(row => {
+        const key = `${row.open}|${row.close}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(row.dayId);
+      });
+
+      const scheduleParts = [];
+      for (const [key, dayIds] of groups.entries()) {
+        const [open, close] = key.split('|');
+        scheduleParts.push(`${dayIds.join(',')} ${open},${close}`);
+      }
+
+      let command = `.setgcauto ${scheduleParts.join('; ')}`;
+      if (openMsg || closeMsg) {
+        command += `|${openMsg}|${closeMsg}`;
+      }
+
+      return command;
+    }
+
+    function updateSummary() {
+      try {
+        const rows = collectSchedules();
+        activeDaysCount.textContent = `${rows.length} hari`;
+        miniInfo.textContent = rows.length
+          ? 'Siap dibuat jadi 1 pesan WhatsApp.'
+          : 'Belum ada hari yang diisi.';
+      } catch (err) {
+        miniInfo.textContent = err.message;
+      }
+    }
+
+    function openWhatsAppWithText(text) {
+      const encoded = encodeURIComponent(text);
+      const appUrl = `whatsapp://send?text=${encoded}`;
+      const webUrl = `https://api.whatsapp.com/send?text=${encoded}`;
+
+      const link = document.createElement('a');
+      link.href = appUrl;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setTimeout(() => {
+        window.open(webUrl, '_blank');
+      }, 400);
+    }
+
+    document.getElementById('applyAllBtn').addEventListener('click', applyAllTimes);
+    document.getElementById('clearAllBtn').addEventListener('click', clearAllTimes);
+    openText.addEventListener('input', updateSummary);
+    closeText.addEventListener('input', updateSummary);
+
+    document.getElementById('sendBtn').addEventListener('click', () => {
+      try {
+        const command = buildCommand();
+        openWhatsAppWithText(command);
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+
+    buildDayRows();
+    updateSummary();
+  </script>
+</body>
+</html>
